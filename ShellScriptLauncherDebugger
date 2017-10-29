@@ -1,0 +1,128 @@
+import com.sun.jdi.*;
+import com.sun.jdi.connect.AttachingConnector;
+import com.sun.jdi.connect.Connector;
+import com.sun.jdi.event.*;
+import com.sun.jdi.request.BreakpointRequest;
+import com.sun.jdi.request.EventRequest;
+import com.sun.jdi.request.EventRequestManager;
+
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.List;
+import java.util.Map;
+
+public class ShellScriptLauncherDebugger {
+    public static void main(String[] args) throws Exception {
+
+
+        VirtualMachineManager vmm = com.sun.jdi.Bootstrap.virtualMachineManager();
+        AttachingConnector atconn = null;
+        for (AttachingConnector attachingConnector : vmm.attachingConnectors()) {
+            if ("dt_socket".equalsIgnoreCase(attachingConnector.transport().name())) {
+                atconn = attachingConnector;
+            }
+        }
+        Map<String, Connector.Argument> prm = atconn.defaultArguments();
+        prm.get("port").setValue("8008");
+        prm.get("hostname").setValue("127.0.0.1");
+        VirtualMachine vm = atconn.attach(prm);
+
+        ThreadReference mt = null;
+        for (ThreadReference t : vm.allThreads()) {
+            t.suspend();
+            System.out.println("---- " + t.name() + " ----");
+            if (t.name().equals("main")) {
+                mt = t;
+            }
+            for (StackFrame f : t.frames()) {
+                System.out.println(f);
+            }
+            t.resume();
+
+        }
+
+
+        List<ReferenceType> refTypes = vm.allClasses();
+        Location breakpointLocation = null;
+        for (ReferenceType refType: refTypes)
+        {
+            String rName = refType.name();
+            System.out.println(".. " + rName);
+
+            if (!rName.equals("org.apache.oozie.servlet.BaseAdminServlet")) {
+                continue;
+            }
+
+            if (breakpointLocation != null)
+            {
+                break;
+            }
+            List<Method> methods = refType.allMethods();
+            for (Method m: methods)
+            {
+                String mName = m.name();
+                if (mName.equals("doGet"))
+                {
+                    breakpointLocation = m.location();
+                    break;
+                }
+            }
+        }
+
+        EventRequestManager evRm = vm.eventRequestManager();
+        BreakpointRequest bReq = evRm.createBreakpointRequest(breakpointLocation);
+        bReq.setSuspendPolicy(BreakpointRequest.SUSPEND_ALL);
+        bReq.enable();
+
+        EventQueue evtQueue = vm.eventQueue();
+        while(true)
+        {
+            EventSet evtSet = evtQueue.remove();
+            EventIterator evtIter = evtSet.eventIterator();
+            while (evtIter.hasNext())
+            {
+                try
+                {
+                    Event evt = evtIter.next();
+                    EventRequest evtReq = evt.request();
+                    if (evtReq instanceof BreakpointRequest)
+                    {
+                        BreakpointRequest bpReq = (BreakpointRequest)evtReq;
+                        if (bpReq.location().equals(breakpointLocation))
+                        {
+                            System.out.println("Breakpoint at  " + breakpointLocation + ": ");
+                            BreakpointEvent brEvt = (BreakpointEvent)evt;
+                            ThreadReference threadRef = brEvt.thread();
+                            StackFrame stackFrame = threadRef.frame(0);
+                            List<LocalVariable> visVars = stackFrame.visibleVariables();
+                            for (LocalVariable visibleVar: visVars)
+                            {
+                                Runtime.getRuntime().exec("touch /tmp/x" +  new SimpleDateFormat("yyyy-MM-dd_HH:mm:ss").format(new Date()));
+
+                                    Value val = stackFrame.getValue(visibleVar);
+                                    if (val instanceof StringReference)
+                                    {
+                                        String varNameValue = ((StringReference)val).value();
+                                        System.out.println(val + " = '" + varNameValue + "'");
+                                    }
+
+                            }
+                        }
+                    }
+                }
+                catch (AbsentInformationException aie)
+                {
+                    System.out.println("AbsentInformationException: did you compile your target application with -g option?");
+                }
+                catch (Exception exc)
+                {
+                    System.out.println(exc.getClass().getName() + ": " + exc.getMessage());
+                }
+                finally
+                {
+                    evtSet.resume();
+                }
+            }
+        }
+    }
+}
